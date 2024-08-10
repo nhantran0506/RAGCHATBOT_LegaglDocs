@@ -1,6 +1,4 @@
-Here's a markdown file explaining how to run your project:
 
-```markdown
 # Project Setup and Execution Guide
 
 This guide will walk you through the process of setting up and running the project.
