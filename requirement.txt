@@ -1,0 +1,7 @@
+beautifulsoup4
+langchain
+requests
+sentence-transformers
+pinecone-client
+python-dotenv
+faiss-cpu
