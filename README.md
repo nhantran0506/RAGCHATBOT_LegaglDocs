@@ -13,8 +13,8 @@ This guide will walk you through the process of setting up and running the proje
 
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/your-repo-name.git
-   cd your-repo-name
+   git clone https://github.com/nhantran0506/RAGCHATBOT_LegaglDocs.git
+   cd .\RAG\
    ```
 
 2. Create and activate a virtual environment (optional but recommended):
@@ -32,7 +32,7 @@ This guide will walk you through the process of setting up and running the proje
    - Follow the instructions at [Ollama's official website](https://ollama.ai/) to install Ollama for your operating system.
    - After installation, run the following command to download the llama2 3.1 model:
      ```
-     ollama pull llama2:3.1
+     ollama run llama3.1
      ```
 
 ## Running the Project
