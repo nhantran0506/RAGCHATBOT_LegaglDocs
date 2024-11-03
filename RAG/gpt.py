@@ -1,5 +1,8 @@
 from processing import RAG
-rag = RAG()
+import logging
+logger = logging.getLogger(__name__)
+
+rag = RAG(model_name="gpt-4o-mini")
 
 while True:
     try:

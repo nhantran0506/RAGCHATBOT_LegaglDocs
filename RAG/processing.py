@@ -1,31 +1,54 @@
 from bs4 import BeautifulSoup
 from langchain.docstore.document import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-import requests
+from langchain_community.embeddings import SentenceTransformerEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_openai import ChatOpenAI
+from langchain_community.chat_models import ChatOllama
 import os
-from sentence_transformers import SentenceTransformer
-from pinecone import Pinecone, ServerlessSpec
+import logging
 import warnings
 from dotenv import load_dotenv
 load_dotenv()
-warnings.filterwarnings('ignore')
+warnings.filterwarnings("ignore")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("app.log"), 
+        logging.StreamHandler()          
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+openai_api_key = os.getenv("OPENAI_API_KEY")
+
 
 class RAG:
-    def __init__(self):
-        self.vector_model = SentenceTransformer("all-MiniLM-L6-v2")
-        self.pinecone = Pinecone(api_key=os.getenv('API_KEY'))
-        self.index_name = "my-vector-db"
-
-        if self.index_name not in self.pinecone.list_indexes().names():
-            self.pinecone.create_index(
-                name=self.index_name,
-                dimension=384,
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="us-east-1"),
-            )
-        self.index = self.pinecone.Index(self.index_name)
+    def __init__(self, model_name="llama3.1"):
+        self.model_name = model_name.lower()
+        self.embedding_function = SentenceTransformerEmbeddings(
+            model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+        )
+        self.index = Chroma(
+            collection_name="legal_docs",
+            embedding_function=self.embedding_function,
+            persist_directory="./chromadb",
+        )
         self.context = []
+
+        if self.model_name != "llama3.1":
+            self.chat_model = ChatOpenAI(
+                model_name=model_name,
+                api_key=openai_api_key,
+                temperature=0.7
+            )
+        else:
+            self.chat_model = ChatOllama(
+                model=model_name,
+                temperature=0.7
+            )
 
     def read_html(self, path):
         with open(path, "r", encoding="utf-8") as file:
@@ -55,28 +78,20 @@ class RAG:
             )
             chunks = text_splitter.split_text(doc.page_content)
             for i, chunk in enumerate(chunks):
-                doc = Document(
+                new_doc = Document(
                     page_content=chunk,
                     metadata={"page": doc.metadata["page"], "chunk": i},
                 )
-                doc.metadata["source"] = (
-                    f"{doc.metadata['page']}-{doc.metadata['chunk']}"
+                new_doc.metadata["source"] = (
+                    f"{new_doc.metadata['page']}-{new_doc.metadata['chunk']}"
                 )
-                doc.metadata["filename"] = filename
-                doc_chunks.append(doc)
+                new_doc.metadata["filename"] = filename
+                doc_chunks.append(new_doc)
         return doc_chunks
 
     def docs_to_index(self, docs):
-        for doc in docs:
-            embeddings = self.vector_model.encode([doc.page_content])
-            metadata = {
-                "page": doc.metadata["page"],
-                "chunk": doc.metadata["chunk"],
-                "filename": doc.metadata["filename"],
-            }
-            self.index.upsert(
-                vectors=[(doc.metadata["source"], embeddings[0].tolist(), metadata)]
-            )
+        self.index.add_documents(docs)
+        self.index.persist()
 
     def create_vectordb(self, paths):
         documents = []
@@ -85,50 +100,54 @@ class RAG:
             documents.extend(self.text_to_docs(text, filename))
         self.docs_to_index(documents)
 
-    def retrieve_relevant_docs(self, query, top_k=5, threshold=0.8):
-        query_embedding = self.vector_model.encode([query])[0].tolist()
-        results = self.index.query(
-            vector=query_embedding, top_k=top_k, include_metadata=True
-        )
-        filtered_results = [
-            match for match in results["matches"] if match["score"] > threshold
-        ]
-        return filtered_results
+    def retrieve_relevant_docs(self, query, top_k=5, similarity_cutoff=0.7):
+        results = self.index.similarity_search_with_score(query, k=top_k)
+        results.sort(key=lambda x: x[1])
+        results = [result for result in results if result[1] <= similarity_cutoff]
+
+        if results != []:
+            logger.info("Got results")
+        return results
 
     def generate_response(self, query):
+        from langchain.schema import HumanMessage, SystemMessage
+        
         relevant_docs = self.retrieve_relevant_docs(query)
-        context = " ".join(
-            [
-                match["metadata"]["text"]
-                for match in relevant_docs
-                if "text" in match["metadata"]
+        
+        if relevant_docs:
+            context = " ".join([doc.page_content for doc, score in relevant_docs])
+            messages = [
+                SystemMessage(content="""
+                    Bạn là một người cực kì am hiểu luật có suy luận logic xuất sắc, bạn sẽ được hỏi một số câu hỏi về luật của Việt Nam.
+                    Câu trả lời nên ngắn gọn, súc tích và dễ hiểu.
+                    Thông tin: """ + context),
+                HumanMessage(content=query)
             ]
-        )
-        input_text = f"""
-            Bạn là một người cực kì am hiểu luật có suy luận logic xuất sắc, bạn sẽ được hỏi một số câu hỏi về luật của Việt Nam.
-            Câu trả lời nên ngắn gọn, súc tích và dễ hiểu.
-            Thông tin: {context} 
-            Người dùng: {query}
-        """
+        else:
+            messages = [
+                SystemMessage(content="""
+                    Bạn là một người cực kì am hiểu luật có suy luận logic xuất sắc, bạn sẽ được hỏi một số câu hỏi về luật của Việt Nam.
+                    Câu trả lời nên ngắn gọn, súc tích và dễ hiểu, và trả lời bằng cùng ngôn ngữ với câu hỏi.
+                    Nếu bạn không chắc chắn về câu trả lời, hãy trả lời 'Tôi không có thông tin về câu hỏi này' bằng ngôn ngữ mà câu hỏi được đặt ra."""),
+                HumanMessage(content=query)
+            ]
 
-        payload = {
-            "model": "llama3.1",
-            "prompt": input_text,
-            "context": self.context,
-            "stream": False,
-        }
+        try:
+            response = self.chat_model.invoke(messages)
+            return response.content
+        except Exception as e:
+            print(f"Error generating response: {str(e)}")
+            return "Error generating response with the specified model"
 
-        response = requests.post(
-            url="http://localhost:11434/api/generate", json=payload
-        ).json()
-        self.context = response["context"]
+# Example usage:
+# Using GPT-4 (requires OPENAI_API_KEY in .env)
+# rag_gpt = RAG(model_name="gpt-4")
 
-        answer = response["response"]
-        return answer
+# Using Llama 2 (requires local Ollama server)
+# rag_llama = RAG(model_name="llama2")
 
-
-# rag = RAG()
-
-# html_dir = '/content/drive/MyDrive/RAG/demuc'
+# html_dir = 'RAG/data/demuc'
 # html_paths = [os.path.join(html_dir, filename) for filename in os.listdir(html_dir) if filename.endswith('.html')]
-# rag.create_vectordb(html_paths)
+# print("Embedding HTML")
+# rag_gpt.create_vectordb(html_paths)
+# print("Done")
